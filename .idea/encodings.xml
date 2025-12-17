@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="Encoding">
+    <file url="file://$PROJECT_DIR$/file.properties" charset="GBK" />
+    <file url="file://$PROJECT_DIR$/src/AiEvaluator.java" charset="GBK" />
+    <file url="file://$PROJECT_DIR$/src/stud/g01/AI.java" charset="GBK" />
+    <file url="file://$PROJECT_DIR$/src/stud/g04/AI.java" charset="GBK" />
+    <file url="file://$PROJECT_DIR$/src/stud/g05/AI.java" charset="GBK" />
+    <file url="file://$PROJECT_DIR$/src/stud/g77/AI.java" charset="GBK" />
+    <file url="file://$PROJECT_DIR$/src/stud/g77/G77Board.java" charset="GBK" />
+    <file url="file://$PROJECT_DIR$/src/stud/g88/AI.java" charset="GBK" />
+    <file url="file://$PROJECT_DIR$/src/stud/g99/AI.java" charset="GBK" />
+  </component>
+</project>

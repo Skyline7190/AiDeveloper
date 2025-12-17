@@ -1,0 +1,10 @@
+<component name="libraryTable">
+  <library name="ais">
+    <CLASSES>
+      <root url="file://$PROJECT_DIR$/lib/ais" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+    <jarDirectory url="file://$PROJECT_DIR$/lib/ais" recursive="false" />
+  </library>
+</component>
