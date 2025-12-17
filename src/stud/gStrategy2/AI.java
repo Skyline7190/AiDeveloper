@@ -13,12 +13,12 @@ public class AI extends core.player.AI {
     @Override
     public void playGame(Game game) {
         super.playGame(game);
-        // 关键修复：每局开始前必须重置棋盘，否则会沿用上一局的棋盘状态导致死循环
+        // 每局开始前必须重置棋盘，否则会沿用上一局的棋盘状态导致死循环
         this.board = new Board();
     }
     @Override
     public Move findNextMove(Move opponentMove) {
-        // 修复 1: 增加空指针检查，防止作为先手时第一回合崩溃
+        // 1: 增加空指针检查，防止作为先手时第一回合崩溃
         if (opponentMove != null) {
             this.board.makeMove(opponentMove);
         }
@@ -39,7 +39,7 @@ public class AI extends core.player.AI {
             }
         }
 
-        // 修复 2: 如果是开局第一手，只落一子 (通过将 index2 设为 index1 或 -1，视具体引擎实现而定)
+        // 2: 如果是开局第一手，只落一子 (通过将 index2 设为 index1 或 -1，视具体引擎实现而定)
         // 这里采用两个相同坐标，许多引擎会将其视为落一子
         if (isFirstMove) {
             Move move = new Move(index1, index1);

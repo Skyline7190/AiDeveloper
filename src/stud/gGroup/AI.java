@@ -20,7 +20,7 @@ public class AI extends core.player.AI {
     @Override
     public void playGame(Game game) {
         super.playGame(game);
-        // 1. 重置棋盘 (关键)
+        // 1. 重置棋盘
         this.board = new Board();
 
         // 2. 初始化并洗牌

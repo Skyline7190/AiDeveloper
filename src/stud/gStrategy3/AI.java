@@ -11,12 +11,12 @@ public class AI extends core.player.AI {
     @Override
     public void playGame(Game game) {
         super.playGame(game);
-        // 关键修复：每局开始前必须重置棋盘，否则会沿用上一局的棋盘状态导致死循环
+        // 每局开始前必须重置棋盘，否则会沿用上一局的棋盘状态导致死循环
         this.board = new Board();
     }
     @Override
     public Move findNextMove(Move opponentMove) {
-        // 修复 1: 空指针检查
+        // 1: 空指针检查
         if (opponentMove != null) {
             this.board.makeMove(opponentMove);
         }
