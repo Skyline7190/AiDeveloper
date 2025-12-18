@@ -5,8 +5,6 @@ import core.board.PieceColor;
 import core.game.Game;
 import core.game.Move;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -19,16 +17,17 @@ public class AI extends core.player.AI {
     private static final int WHITE = 2;
     private static final int EMPTY = 0;
     
-    // Evaluation Weights
+    // 评估权重
     private static final int WIN = 10000000;
     private static final int LIVE_5 = 100000;
     private static final int LIVE_4 = 5000;
-    private static final int DEAD_4 = 1000;
+    // DEAD_4 常量当前未使用，已移除以消除警告
+    // private static final int DEAD_4 = 1000;
     private static final int LIVE_3 = 500;
     private static final int LIVE_2 = 100;
     private static final int LIVE_1 = 10;
     
-    private int[] grid = new int[SIZE];
+    private final int[] grid = new int[SIZE];
     private int myColorInt;
     private int oppColorInt;
 
@@ -49,7 +48,7 @@ public class AI extends core.player.AI {
             this.board.makeMove(opponentMove);
         }
 
-        // 1. Sync Grid & Determine Color
+        // 1. 同步棋盘并确定颜色
         int pieceCount = 0;
         for (int i = 0; i < SIZE; i++) {
             PieceColor c = this.board.get(i);
@@ -72,20 +71,21 @@ public class AI extends core.player.AI {
             oppColorInt = WHITE;
         }
 
-        // 2. Search
-        Move bestMove = alphaBetaSearch(2); // Depth 2
-        
+        // 2. 搜索
+        Move bestMove = alphaBetaSearch(); // 深度 2
+
         this.board.makeMove(bestMove);
         return bestMove;
     }
 
-    // --- Search ---
+    // --- 搜索 ---
 
-    private Move alphaBetaSearch(int depth) {
+    private Move alphaBetaSearch() {
+        int depth = 2;
         List<MyMove> moves = generateMoves(myColorInt);
         
-        // If only 1 move (forced win/block), return it
-        if (moves.isEmpty()) return new Move(getAnyEmpty(), getAnyEmpty()); // Fallback
+        // 如果只有一个走法（必胜或必须阻挡），直接返回
+        if (moves.isEmpty()) return new Move(getAnyEmpty(), getAnyEmpty()); // 备用（回退）
         if (moves.size() == 1) return moves.get(0).toMove();
 
         int alpha = -2000000000;
@@ -108,13 +108,13 @@ public class AI extends core.player.AI {
     private int minValue(int depth, int alpha, int beta) {
         if (depth == 0) return evaluate();
         
-        // Check for Game Over (My Win)?
-        // If previous move won, score is high. But here we assume game continues.
-        // Actually, evaluate checks board. 
-        // If Opponent (who is moving now) sees I won, score is MAX for me.
+        // 检查游戏是否结束（我方获胜）?
+        // 如果之前的走法已导致胜利，评分会很高。但这里假设游戏继续。
+        // 实际上 evaluate 会检查棋盘。
+        // 如果现在该对手走，对手会看到我方已获胜，则对我方评分为最大。
         int currentScore = evaluate();
-        if (currentScore > WIN / 2) return currentScore; // I already won
-        
+        if (currentScore > WIN / 2) return currentScore; // 我已经获胜
+
         List<MyMove> moves = generateMoves(oppColorInt);
         if (moves.isEmpty()) return currentScore;
 
@@ -127,7 +127,7 @@ public class AI extends core.player.AI {
             if (val < value) {
                 value = val;
             }
-            if (value <= alpha) return value; // Prune
+            if (value <= alpha) return value; // 剪枝
             beta = Math.min(beta, value);
         }
         return value;
@@ -137,8 +137,8 @@ public class AI extends core.player.AI {
         if (depth == 0) return evaluate();
         
         int currentScore = evaluate();
-        if (currentScore < -WIN / 2) return currentScore; // Opponent won
-        
+        if (currentScore < -WIN / 2) return currentScore; // 对手获胜
+
         List<MyMove> moves = generateMoves(myColorInt);
         if (moves.isEmpty()) return currentScore;
 
@@ -151,20 +151,20 @@ public class AI extends core.player.AI {
             if (val > value) {
                 value = val;
             }
-            if (value >= beta) return value; // Prune
+            if (value >= beta) return value; // 剪枝
             alpha = Math.max(alpha, value);
         }
         return value;
     }
 
-    // --- Move Generation ---
+    // --- 走法生成 ---
 
     private List<MyMove> generateMoves(int color) {
         List<MyMove> moves = new ArrayList<>();
         int otherColor = (color == BLACK) ? WHITE : BLACK;
         
-        // 1. Check Forced Moves (Win/Block)
-        // We scan for 4s and 5s.
+        // 1. 检查强制走法（必胜/必须阻挡）
+        // 我们扫描4 连和5连的威胁。
         Set<Integer> win5 = new HashSet<>();
         Set<Integer> win4 = new HashSet<>();
         Set<Integer> block5 = new HashSet<>();
@@ -173,43 +173,38 @@ public class AI extends core.player.AI {
         scanThreats(color, win5, win4);
         scanThreats(otherColor, block5, block4);
         
-        // Priority 1: Win 5 -> Win 
+        // 优先级1：连五获胜
         if (!win5.isEmpty()) {
             int p1 = win5.iterator().next();
             moves.add(new MyMove(p1, getBestNeighbor(p1)));
             return moves;
         }
         
-        // Priority 2: Win 4 -> Win
+        // 优先级2：活四或冲四获胜
         if (!win4.isEmpty()) {
-            // Need to find the pair.
-            // For simplicity, we just look for any pair of empty spots in the win4 lines.
-            // Better: Iterate all pairs of 'win4' spots? 
-            // Correct approach: The scan found lines. We need the specific empty spots.
-            // Let's assume we find the pair correctly.
-            // Fallback: If we have win4 spots, just generate pairs from them.
+            // 需要找到配对位置。
+            // 为简化，这里从 win4 集合中取两个位置构成一对。
             List<Integer> list = new ArrayList<>(win4);
             if (list.size() >= 2) {
-                 moves.add(new MyMove(list.get(0), list.get(1))); // Optimistic
-                 // Realistically, should verify the pair works.
-                 // But for V2 skeleton, this is okay.
+                 moves.add(new MyMove(list.get(0), list.get(1))); // 乐观策略
+                 // 实际上应验证该对是否能成五，但这里作为简化处理。
                  return moves;
             }
         }
         
-        // Priority 3: Block 5 -> Must block
+        // 优先级3：阻挡对方连五（必须阻挡）
         if (!block5.isEmpty()) {
             int p1 = block5.iterator().next();
-            // We must play p1. Second stone can be heuristic.
-            // If multiple block5, play p1 and p2.
+            // 必须下 p1。第二个子位使用启发式选择。
+            // 如果有多个 block5，尽量处理前两个。
             List<Integer> list = new ArrayList<>(block5);
             if (list.size() >= 2) {
                 moves.add(new MyMove(list.get(0), list.get(1)));
                 return moves;
             }
             
-            // Only 1 block needed.
-            // Combine p1 with top heuristic candidates.
+            // 仅需一个阻挡位置。
+            // 将 p1 与顶级启发式候选位置组合。
             List<Integer> candidates = getCandidates(color, 10);
             for (int c : candidates) {
                 if (c != p1) moves.add(new MyMove(p1, c));
@@ -218,17 +213,24 @@ public class AI extends core.player.AI {
             return moves;
         }
         
-        // Priority 4: Block 4 -> Must block
+        // 优先级4：阻挡对方活四（必须阻挡）
         if (!block4.isEmpty()) {
-            // Similar logic.
-            // For V2, just take top candidates + block spots.
+            // 相似逻辑。
+            // 为简化版本，仅将阻挡位于候选位组合。
+            List<Integer> candidates = getCandidates(color, 8);
+            for (int b : block4) {
+                for (int c : candidates) {
+                    if (b != c) moves.add(new MyMove(b, c));
+                }
+            }
+            if (!moves.isEmpty()) return moves;
         }
         
-        // Normal Generation
-        // Get top candidates (near pieces)
-        List<Integer> candidates = getCandidates(color, 12); // Reduced count for speed
-        
-        // Generate pairs
+        // 常规生成
+        // 获取顶级候选位置（靠近棋子）
+        List<Integer> candidates = getCandidates(color, 12); // 为速度减少候选数
+
+        // 生成两子对组合
         for (int i = 0; i < candidates.size(); i++) {
             for (int j = i + 1; j < candidates.size(); j++) {
                 moves.add(new MyMove(candidates.get(i), candidates.get(j)));
@@ -239,8 +241,8 @@ public class AI extends core.player.AI {
     }
     
     private List<Integer> getCandidates(int color, int limit) {
-        // Find empty spots with highest heuristic score
-        // Score = adjacent to same color * 2 + adjacent to opp color * 1 + center
+        // 找到启发式评分最高的空位
+        // 评分 = 与己方相邻*2 + 与对手相邻*1 + 中心性
         List<PointScore> scores = new ArrayList<>();
         int cx = WIDTH/2;
         int cy = WIDTH/2;
@@ -249,12 +251,12 @@ public class AI extends core.player.AI {
             if (grid[i] != EMPTY) continue;
             
             int score = 0;
-            // Centrality
+            // 中心性
             int x = i % WIDTH;
             int y = i / WIDTH;
             score += (10 - Math.abs(x - cx)) + (10 - Math.abs(y - cy));
             
-            // Neighbors
+            // 邻居
             for(int dy=-1; dy<=1; dy++) {
                 for(int dx=-1; dx<=1; dx++) {
                     if (dx==0 && dy==0) continue;
@@ -267,68 +269,72 @@ public class AI extends core.player.AI {
                 }
             }
             
-            // Optimization: Only consider spots near stones (unless board empty)
-            if (score > 10) // Threshold to ignore far away empty space
+            // 优化：只考虑靠近棋子的空位（除非棋盘为空）
+            if (score > 10) // 阈值，用于忽略远离的空位
                 scores.add(new PointScore(i, score));
         }
         
-        Collections.sort(scores, (a, b) -> b.score - a.score);
-        
+        scores.sort((a, b) -> b.score - a.score);
+
         List<Integer> res = new ArrayList<>();
         for(int k=0; k<Math.min(limit, scores.size()); k++) {
             res.add(scores.get(k).idx);
         }
-        // If empty (start of game), add center
+        // 如果为空（开局），加入中心
         if (res.isEmpty()) res.add(cx * WIDTH + cy);
         
         return res;
     }
 
     private void scanThreats(int color, Set<Integer> win5, Set<Integer> win4) {
-        // Simplified scan (Check lines)
-        // ... (Similar to V1 but using grid array)
-        // Using optimized approach:
+        // 简化扫描（检查行）
+        // ...（类似 V1，但使用 grid 数组）
+        // 使用优化方式：
         int[] dx = {1, 0, 1, 1};
         int[] dy = {0, 1, 1, -1};
         
         for (int d=0; d<4; d++) {
             for (int y=0; y<WIDTH; y++) {
                 for (int x=0; x<WIDTH; x++) {
-                    // Check bounds for line of 6
+                    // 检查长度为6的线段是否越界
                     int ex = x + 5*dx[d];
                     int ey = y + 5*dy[d];
-                    if (ex < 0 || ex >= WIDTH || ey < 0 || ey >= WIDTH) continue;
-                    
+                    // ex < 0 在当前 dx 集合中不可能（dx >= 0），因此移除该条件
+                    if (ex >= WIDTH || ey < 0 || ey >= WIDTH) continue;
+
                     int cnt = 0;
                     int empty = 0;
                     int[] emptyIdx = new int[6];
                     
                     for (int k=0; k<6; k++) {
-                        int val = grid[(y+k*dy[d])*WIDTH + (x+k*dx[d])];
+                        int nx = x + k * dx[d];
+                        int ny = y + k * dy[d];
+                        int pos = ny * WIDTH + nx;
+                        int val = grid[pos];
                         if (val == color) cnt++;
                         else if (val == EMPTY) {
-                            emptyIdx[empty++] = (y+k*dy[d])*WIDTH + (x+k*dx[d]);
+                            emptyIdx[empty++] = pos;
                         } else {
-                            cnt = -1; // Blocked
+                            cnt = -1; // 被阻塞
                             break;
                         }
                     }
-                    
+
                     if (cnt == 5 && empty == 1) win5.add(emptyIdx[0]);
                     if (cnt == 4 && empty == 2) {
                         win4.add(emptyIdx[0]);
                         win4.add(emptyIdx[1]);
                     }
-                }
-            }
-        }
-    }
+                 }
+             }
+         }
+     }
 
-    // --- Evaluation ---
+    // --- 评估 ---
 
     private int evaluate() {
         int score = 0;
-        // Evaluate all lines for MyColor - Evaluate for OppColor
+        // 对我方和对方的所有线路进行评估
         score += evaluateColor(myColorInt);
         score -= evaluateColor(oppColorInt);
         return score;
@@ -344,17 +350,19 @@ public class AI extends core.player.AI {
                 for (int x=0; x<WIDTH; x++) {
                     int ex = x + 5*dx[d];
                     int ey = y + 5*dy[d];
-                    if (ex < 0 || ex >= WIDTH || ey < 0 || ey >= WIDTH) continue;
-                    
+                    // ex < 0 在当前 dx 集合中不可能（dx >= 0），因此移除该条件
+                    if (ex >= WIDTH || ey < 0 || ey >= WIDTH) continue;
+
                     int cnt = 0;
-                    int empty = 0;
                     boolean blocked = false;
                     
                     for (int k=0; k<6; k++) {
-                        int val = grid[(y+k*dy[d])*WIDTH + (x+k*dx[d])];
+                        int nx = x + k * dx[d];
+                        int ny = y + k * dy[d];
+                        int pos = ny * WIDTH + nx;
+                        int val = grid[pos];
                         if (val == color) cnt++;
-                        else if (val == EMPTY) empty++;
-                        else { blocked = true; break; }
+                        else if (val != EMPTY) { blocked = true; break; }
                     }
                     
                     if (!blocked) {
@@ -371,8 +379,8 @@ public class AI extends core.player.AI {
         return score;
     }
 
-    // --- Helpers ---
-    
+    // --- 辅助函数 ---
+
     private void applyMove(MyMove m, int color) {
         grid[m.p1] = color;
         grid[m.p2] = color;
@@ -384,7 +392,7 @@ public class AI extends core.player.AI {
     }
     
     private int getBestNeighbor(int idx) {
-        // Return a valid neighbor or random empty
+        // 返回一个合法的邻居或随机空位
         int x = idx % WIDTH;
         int y = idx / WIDTH;
         for(int dy=-1; dy<=1; dy++) {
@@ -405,7 +413,7 @@ public class AI extends core.player.AI {
         for(int i=0; i<SIZE; i++) {
             if (grid[i] == EMPTY) return i;
         }
-        return 0; // Should not happen
+        return 0; // 正常不会到这里
     }
 
     private static class MyMove {
@@ -420,3 +428,4 @@ public class AI extends core.player.AI {
         PointScore(int i, int s) { idx = i; score = s; }
     }
 }
+
