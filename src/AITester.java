@@ -14,9 +14,9 @@ import java.util.ArrayList;
 public class AITester {
     public static void main(String[] args) throws CloneNotSupportedException {
         StopwatchCPU timer = new StopwatchCPU();
-        zeroCarnival(); //随机棋手大狂欢
+        //zeroCarnival(); //随机棋手大狂欢
         //oucLeague(); //海之子联赛
-        //oneMatch();    //自组织一场比赛（两个棋手先后手各下一局，共下两局棋）
+        oneMatch();    //自组织一场比赛（两个棋手先后手各下一局，共下两局棋）
         double elapsedTime = timer.elapsedTime();
         System.out.printf("%.4f", elapsedTime);
     }
@@ -45,10 +45,11 @@ public class AITester {
     private static ArrayList<Player> createPlayers(){
         ArrayList<Player> players = new ArrayList<>();
         //添加本次实验要求的AI
-        players.add(new stud.gStrategy1.AI());//走法1
-        players.add(new stud.gStrategy2.AI());//走法2
+        //players.add(new stud.gStrategy1.AI());//走法1
+        //players.add(new stud.gStrategy2.AI());//走法2
         players.add(new stud.gStrategy3.AI());//走法3
-        players.add(new stud.gGroup.AI());//小组随机棋手
+        //players.add(new stud.gGroup.AI());//小组随机棋手
+        players.add(new stud.g09.AI());//My AI V1
         return players;
     }
     //海之子联赛
@@ -66,8 +67,8 @@ public class AITester {
     private static void oneMatch(){
         Configuration.GUI = true;
         Configuration.STEP_INTER = 300;
-        Player one = new stud.g88.AI();
-        Player two = new stud.g99.AI();
+        Player one = new stud.g99.AI();
+        Player two = new stud.g09.AI();
         Match match = new Match(2, one, two);
         for (Game game : match.getGames()){
             game.run();
