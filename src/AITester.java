@@ -14,9 +14,9 @@ import java.util.ArrayList;
 public class AITester {
     public static void main(String[] args) throws CloneNotSupportedException {
         StopwatchCPU timer = new StopwatchCPU();
-        //zeroCarnival(); //随机棋手大狂欢
+        zeroCarnival(); //随机棋手大狂欢
         //oucLeague(); //海之子联赛
-        oneMatch();    //自组织一场比赛（两个棋手先后手各下一局，共下两局棋）
+        //oneMatch();    //自组织一场比赛（两个棋手先后手各下一局，共下两局棋）
         double elapsedTime = timer.elapsedTime();
         System.out.printf("%.4f", elapsedTime);
     }
@@ -37,7 +37,7 @@ public class AITester {
 
         //每对棋手下500局棋，先后手各250局
         //n个棋手，共下C(n,2)*500局棋，每个棋手下500*(n-1)局棋
-        event.carnivalRun(1000);
+        event.carnivalRun(500);
         event.showResults();
     }
 
@@ -47,10 +47,13 @@ public class AITester {
         //添加本次实验要求的AI
         //players.add(new stud.gStrategy1.AI());//走法1
         //players.add(new stud.gStrategy2.AI());//走法2
-        players.add(new stud.gStrategy3.AI());//走法3
+        //players.add(new stud.gStrategy3.AI());//走法3
         //players.add(new stud.gGroup.AI());//小组随机棋手
         players.add(new stud.g09.AI());//My AI V1
+        players.add(new stud.g13.AI());
+        //players.add(new stud.g09.AI());
         return players;
+
     }
     //海之子联赛
     private static void oucLeague() throws CloneNotSupportedException {

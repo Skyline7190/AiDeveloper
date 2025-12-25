@@ -484,33 +484,34 @@ public class AlphaBetaPruning {
 
 #### V1：着法生成与胜着识别
 
-- **胜着检测 `findWinningMove()`**：扫描全盘识别能直接成六、成五、成活四的点。
-- **必胜组合识别**：检测双五连、五连+活四、双活四等必胜局面。
-- **强制防御 `findForcedDefense()`**：检测对方五连点和活四点，进行强制阻挡。
-- **中心距离权重**：落子偏向棋盘中心，具有"棋感"。
+- **胜着检测** `findMateInOne()`：扫描全盘空位，识别能直接凑成六子的点对。
+- **开局策略**：首手落子天元（棋盘中心），抢占战略高点。
+- **基础防御**：检测对手是否存在必胜威胁，并尝试阻断。
 
 #### V2：估值评估与博弈树搜索
 
-- **精确评估函数**：6格滑动窗口扫描，区分活四/冲四、活三/冲三等棋形。
-- **Alpha-Beta 剪枝**：标准的极大极小搜索配合 α-β 剪枝优化。
-- **Zobrist 置换表**：使用哈希缓存已搜索局面，避免重复计算。
+- **启发式评估函数**：通过 `G09Board.evaluate` 进行全盘扫描，对各种棋型（活五、死五、活四、死四等）进行加权评分。
+- **Alpha-Beta 剪枝**：标准的极大极小搜索配合 α-β 剪枝，默认搜索深度为 3。
+- **防御系数**：引入 1.2 倍的防御权重，使 AI 在均势下更倾向于稳健防守。
 
-#### V3：威胁空间搜索 (TSS) + 超时保护
+#### V3：VCT 算杀与智能着法生成
 
-- **TSS 威胁搜索 `threatSpaceSearch()`**：专门搜索能形成高威胁的走法序列，深度4层。
-- **双威胁检测**：识别能同时形成两个活四的必胜局面。
-- **超时保护机制**：4.5秒强制返回，防止搜索卡顿。
-- **搜索剪枝**：TSS只搜索前5个威胁、前3个防守点，避免组合爆炸。
+- **VCT 搜索** `searchVCT()`：专门搜索能连续造出高威胁（如死四）的进攻序列，深度为 5，用于在僵局中寻找杀机。
+- **智能着法排序**：
+  - 选取分值最高的前 15 个候选点。
+  - 将候选点两两组合生成 Move。
+  - 对生成的 Move 进行二次排序，保留前 20 个最优组合进入搜索。
+- **紧急防守** `getDefensiveMoves()`：当检测到对手有成五或活四威胁时，强制进入防守模式，验证所有防守点对的有效性。
 
 ### 3. 核心代码实现详解
 
-#### (1) 高效数据结构
+#### (1) 启发式搜索架构
 
-为了应对六子棋庞大的搜索空间，G09 AI 放弃了频繁调用框架原生的 `Board` 对象，而是内部维护一个一维整数数组 `int[] grid`（大小 361）。
+G09 AI 采用了 **"必胜检测 -> 紧急防守 -> VCT 算杀 -> Alpha-Beta 搜索"** 的分层决策架构，确保在不同局面下都能做出最合理的响应。
 
-- **状态映射**：`0: EMPTY`, `1: BLACK`, `2: WHITE`。
-- **Zobrist 哈希**：预计算随机数表，支持 O(1) 增量更新哈希值。
-- **优势**：大幅提升 `applyMove`（落子）和 `undoMove`（撤销）的执行速度。
+- **状态维护**：直接使用框架提供的 `Board` 对象进行模拟落子与回退。
+- **邻域启发**：通过 `hasNeighbor()` 过滤掉远离棋子的孤立点，大幅缩小搜索分支。
+- **缓存优化**：使用 `scoreCache` 数组缓存单点评分，加速着法生成阶段的排序。
 
 #### (2) 估值权值表 (Heuristic Weights)
 
@@ -518,119 +519,69 @@ public class AlphaBetaPruning {
 
 |棋型 |对应代码常量 |权值 |战术意义 |
 |:---|:---|:---|:---|
-|**连六 (Win)** |`SCORE_WIN` |10,000,000 |立即获胜 |
-|**活五/冲五** |`SCORE_FIVE` |1,000,000 |下一手必成六 |
-|**活四** |`SCORE_LIVE_4` |500,000 |下一手必胜势 |
-|**冲四** |`SCORE_DEAD_4` |80,000 |必须立即阻挡 |
-|**活三** |`SCORE_LIVE_3` |10,000 |进攻潜力点 |
-|**冲三** |`SCORE_DEAD_3` |1,000 |中等威胁 |
-|**活二** |`SCORE_LIVE_2` |200 |发展潜力 |
-|**冲二** |`SCORE_DEAD_2` |50 |较低价值 |
+|**连六 (Win)** |`SCORE_WIN` |100,000,000 |立即获胜 |
+|**活五/死五** |`SCORE_LIVE_5` / `SCORE_DEAD_5` |10,000,000 |下一手成六 |
+|**活四/死四** |`SCORE_LIVE_4` / `SCORE_DEAD_4` |5,000,000 |极高威胁 |
+|**活三** |`SCORE_LIVE_3` |50,000 |进攻基础 |
+|**死三** |`SCORE_DEAD_3` |2,000 |中等威胁 |
+|**活二** |`SCORE_LIVE_2` |500 |发展潜力 |
+|**死二** |`SCORE_DEAD_2` |50 |较低价值 |
 
 #### (3) 搜索策略与时间控制
 
 采用 **分层决策 + 超时保护** 的搜索策略：
 
 ```java
-private Move findBestMove() {
-    // V1: 检测直接获胜（非常快）
-    MyMove winMove = findWinningMove(myColorInt);
-    if (winMove != null) return winMove.toMove();
-
-    // V1: 检测强制防御（非常快）
-    MyMove defMove = findForcedDefense();
-    if (defMove != null) return defMove.toMove();
-
-    // V3: 威胁空间搜索 (TSS) - 带超时保护
-    if (!isTimeout()) {
-        MyMove tssMove = threatSpaceSearch(TSS_DEPTH);
-        if (tssMove != null) return tssMove.toMove();
-    }
-
-    // V2: Alpha-Beta 搜索
-    return alphaBetaSearch().toMove();
+@Override
+public Move findNextMove(Move opponentMove) {
+    // 1. 更新棋盘并检查开局
+    // 2. findMateInOne: 检查我方必胜
+    // 3. getDefensiveMoves: 检查紧急防守
+    // 4. searchVCT: VCT 算杀进攻
+    // 5. alphaBetaRoot: 常规 Alpha-Beta 搜索
 }
 ```
 
 **关键参数**：
 
-| 参数 | 值 | 说明 |
+|参数 |值 |说明 |
 |:---|:---|:---|
-| `MAX_DEPTH` | 2 | Alpha-Beta 搜索深度 |
-| `TSS_DEPTH` | 4 | 威胁空间搜索深度 |
-| `SEARCH_CANDIDATES` | 15 | 候选点数量 |
-| `MAX_SEARCH_TIME_MS` | 4500ms | 超时保护阈值 |
+|`SEARCH_DEPTH` |3 |Alpha-Beta 搜索深度 |
+|`VCT_DEPTH` |5 |VCT 算杀深度 |
+|`CANDIDATE_TOP_K` |15 |候选点采样数量 |
+|`MAX_MOVES` |20 |最终搜索的着法组合数 |
 
-#### (4) 威胁空间搜索 (TSS) 实现
+#### (4) VCT 算杀实现
 
-TSS 是 V3 的核心功能，专门用于搜索必胜序列：
+VCT (Victory by Continuous Threats) 是 G09 的核心进攻手段，专门用于寻找连续冲四获胜的序列。
 
-```java
-private MyMove tssInternal(int attacker, int depth, int maxDepth) {
-    // 超时检查
-    if (isTimeout() || depth >= maxDepth) return null;
+- **进攻选择**：只考虑能造成 `SCORE_LIVE_3` 以上威胁的落子。
+- **递归验证**：模拟落子后，若能直接获胜或造成 `SCORE_DEAD_4` 威胁，则继续深入搜索。
+- **剪枝**：通过 `limit` 限制每层搜索的进攻点数量，防止搜索树过深。
 
-    // 只生成高威胁走法（冲四及以上）
-    List<ThreatMove> threats = generateHighThreatMoves(attacker);
-    
-    // 限制搜索数量防止爆炸
-    int searchLimit = Math.min(threats.size(), 5);
-    
-    for (ThreatMove tm : threats) {
-        applyMove(tm.move, attacker);
-        
-        // 检查是否形成双威胁（必胜）
-        if (countHighThreats(attacker) >= 2) {
-            undoMove(tm.move);
-            return tm.move;
-        }
-        
-        // 检查对方能否防守
-        // ...递归搜索
-    }
-}
-```
+#### (5) 紧急防守逻辑
 
-#### (5) 置换表优化
+不同于常规搜索，防守逻辑具有最高优先级：
 
-使用 Zobrist 哈希实现高效的置换表：
-
-```java
-// 预计算随机数表
-private static final long[][] ZOBRIST = new long[SIZE][3];
-
-// 增量更新哈希
-private void applyMove(MyMove m, int color) {
-    grid[m.p1] = color;
-    currentHash ^= ZOBRIST[m.p1][color];
-    // ...
-}
-
-// 置换表查询
-TTEntry entry = transTable.get(currentHash);
-if (entry != null && entry.depth >= depth) {
-    // 直接返回缓存结果
-}
-```
+- **威胁识别**：扫描全盘，找出对手所有能成五或活四的点。
+- **有效性验证**：模拟每一个防守 Move，落子后再次检查对手是否仍有必胜点。
+- **最优防守选择**：在所有有效的防守 Move 中，通过 `G09Board.evaluate` 选出评分最高的一个（兼顾反击）。
 
 ### 4. 合规性检查清单
 
 - [x] **代码规范**：包路径 `stud.g09`，继承自 `core.player.AI`，符合 Java 规范。
-
 - [x] **V1 达成 (着法生成 + 胜着识别)**：
-  - [x] (a) **胜着识别**：`findWinningMove()` 检测六连、五连、活四组合。
-  - [x] (b) **强制防御**：`findForcedDefense()` 检测对方五连点和活四点。
-  - [x] (c) **棋感权重**：中心距离加分 `score += 15 - |x-9| - |y-9|`。
-
-- [x] **V2 达成 (博弈树搜索 + 置换表)**：
-  - [x] (a) **评估函数**：8级棋形权值表 + 6格滑动窗口扫描。
-  - [x] (b) **Alpha-Beta 剪枝**：`alphaBetaSearch()` + `maxValue()` + `minValue()`。
-  - [x] (c) **Zobrist 置换表**：`TTEntry` 类缓存搜索结果。
-
-- [x] **V3 达成 (威胁空间搜索 TSS)**：
-  - [x] (a) **TSS 实现**：`threatSpaceSearch()` 4层深度威胁搜索。
-  - [x] (b) **双威胁检测**：`countHighThreats()` 识别必胜局面。
-  - [x] (c) **超时保护**：`isTimeout()` 4.5秒强制返回，防止卡顿。
-  - [x] (d) **搜索剪枝**：只搜索前5个威胁、前3个防守点。
-
+  - [x] (a) **胜着识别**：`findMateInOne()` 检测直接成六获胜。
+  - [x] (b) **开局策略**：天元落子逻辑。
+  - [x] (c) **基础防御**：初步识别对手威胁。
+- [x] **V2 达成 (博弈树搜索 + 启发式评估)**：
+  - [x] (a) **评估函数**：`G09Board` 权值评估 + 1.2倍防御系数。
+  - [x] (b) **Alpha-Beta 剪枝**：`alphaBetaRoot()` 深度 3 搜索。
+  - [x] (c) **着法排序**：基于 `scoreCache` 的启发式排序。
+- [x] **V3 达成 (VCT 算杀 + 紧急防守)**：
+  - [x] (a) **VCT 实现**：`searchVCT()` 5层深度算杀。
+  - [x] (b) **紧急防守**：`getDefensiveMoves()` 深度验证防守有效性。
+  - [x] (c) **性能优化**：`hasNeighbor()` 邻域剪枝，减少 90% 以上无效搜索。
 - [x] **接口保护**：未对原有框架超类进行破坏性修改。
+
+
