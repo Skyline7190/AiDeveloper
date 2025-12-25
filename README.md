@@ -482,21 +482,25 @@ public class AlphaBetaPruning {
 
 ### 2. 阶段目标与实现
 
-#### V1：着法生成与启发式防守
+#### V1：着法生成与胜着识别
 
-- 识别必胜点（连5成6）。
-- 设计扫描算法，检测对方威胁（冲4/活3）。
-- 引入距离权重与邻近权重，使落子具有一定的“棋感”。
+- **胜着检测 `findWinningMove()`**：扫描全盘识别能直接成六、成五、成活四的点。
+- **必胜组合识别**：检测双五连、五连+活四、双活四等必胜局面。
+- **强制防御 `findForcedDefense()`**：检测对方五连点和活四点，进行强制阻挡。
+- **中心距离权重**：落子偏向棋盘中心，具有"棋感"。
 
 #### V2：估值评估与博弈树搜索
 
-- **评估函数**：对活四、冲四、活三等棋型设置不同权值。
-- **AB 剪枝**：实现标准的博弈树剪枝，过滤无效分支。
+- **精确评估函数**：6格滑动窗口扫描，区分活四/冲四、活三/冲三等棋形。
+- **Alpha-Beta 剪枝**：标准的极大极小搜索配合 α-β 剪枝优化。
+- **Zobrist 置换表**：使用哈希缓存已搜索局面，避免重复计算。
 
-#### V3：威胁空间搜索 (TSS) 优化
+#### V3：威胁空间搜索 (TSS) + 超时保护
 
-- **TSS 思想**：优先考虑产生威胁或消除威胁的点，大幅缩小分支因子。
-- **性能优化**：使用内部位数组代替对象调用，提升搜索速度。
+- **TSS 威胁搜索 `threatSpaceSearch()`**：专门搜索能形成高威胁的走法序列，深度4层。
+- **双威胁检测**：识别能同时形成两个活四的必胜局面。
+- **超时保护机制**：4.5秒强制返回，防止搜索卡顿。
+- **搜索剪枝**：TSS只搜索前5个威胁、前3个防守点，避免组合爆炸。
 
 ### 3. 核心代码实现详解
 
@@ -505,58 +509,128 @@ public class AlphaBetaPruning {
 为了应对六子棋庞大的搜索空间，G09 AI 放弃了频繁调用框架原生的 `Board` 对象，而是内部维护一个一维整数数组 `int[] grid`（大小 361）。
 
 - **状态映射**：`0: EMPTY`, `1: BLACK`, `2: WHITE`。
-- **优势**：大幅提升了 `applyMove`（落子）和 `undoMove`（撤销）的执行速度，支持每秒百万级的节点访问。
+- **Zobrist 哈希**：预计算随机数表，支持 O(1) 增量更新哈希值。
+- **优势**：大幅提升 `applyMove`（落子）和 `undoMove`（撤销）的执行速度。
 
 #### (2) 估值权值表 (Heuristic Weights)
 
-针对六子棋规则（六连胜），重新设计了棋形评分标准，重点区分了“活五”与“活四”的绝对威胁：
+针对六子棋规则（六连胜），重新设计了棋形评分标准：
 
 |棋型 |对应代码常量 |权值 |战术意义 |
 |:---|:---|:---|:---|
 |**连六 (Win)** |`SCORE_WIN` |10,000,000 |立即获胜 |
-|**活五/冲五** |`SCORE_FIVE` |1,000,000 |下一手必成六（必胜或极高威胁） |
-|**活四** |`SCORE_LIVE_4` |500,000 |下一手加两子成六（必胜势） |
-|**冲四** |`SCORE_DEAD_4` |50,000 |必须立即阻挡 |
-|**活三** |`SCORE_LIVE_3` |5,000 |进攻潜力点 |
-|**冲三** |`SCORE_DEAD_3` |500 |较低威胁 |
+|**活五/冲五** |`SCORE_FIVE` |1,000,000 |下一手必成六 |
+|**活四** |`SCORE_LIVE_4` |500,000 |下一手必胜势 |
+|**冲四** |`SCORE_DEAD_4` |80,000 |必须立即阻挡 |
+|**活三** |`SCORE_LIVE_3` |10,000 |进攻潜力点 |
+|**冲三** |`SCORE_DEAD_3` |1,000 |中等威胁 |
+|**活二** |`SCORE_LIVE_2` |200 |发展潜力 |
+|**冲二** |`SCORE_DEAD_2` |50 |较低价值 |
 
-#### (3) 搜索与剪枝策略
+#### (3) 搜索策略与时间控制
 
-采用 **Alpha-Beta 剪枝算法**，并针对六子棋“一手两子”的高分支因子进行了特定优化：
+采用 **分层决策 + 超时保护** 的搜索策略：
 
-- **搜索深度**：默认 `MAX_DEPTH = 2`。由于评估函数较为精准，浅层搜索配合高选择性剪枝即可达到较强棋力。
-- **候选点筛选**：在生成走法时，不搜索所有空位，而是预先评估所有单点的“进攻+防守”价值，仅选取分数最高的 **15** 个候选点（`SEARCH_CANDIDATES`）进行两两组合。
+```java
+private Move findBestMove() {
+    // V1: 检测直接获胜（非常快）
+    MyMove winMove = findWinningMove(myColorInt);
+    if (winMove != null) return winMove.toMove();
 
-#### (4) 走法生成逻辑 (Move Generation)
+    // V1: 检测强制防御（非常快）
+    MyMove defMove = findForcedDefense();
+    if (defMove != null) return defMove.toMove();
 
-`findNextMove` 采用分层决策逻辑：
+    // V3: 威胁空间搜索 (TSS) - 带超时保护
+    if (!isTimeout()) {
+        MyMove tssMove = threatSpaceSearch(TSS_DEPTH);
+        if (tssMove != null) return tssMove.toMove();
+    }
 
+    // V2: Alpha-Beta 搜索
+    return alphaBetaSearch().toMove();
+}
+```
 
-1. **必胜扫描**：优先检测是否存在直接获胜的走法。
-2. **强制防守**：检测对方是否存在“冲四”或“活五”等致命威胁。若有，强制生成阻挡走法（`findForcedDefenseMoves`），剪掉其余分支。
-3. **常规搜索**：若无紧急情况，基于启发式评估生成高分候选组合，进入 Alpha-Beta 搜索树寻找最优解。
+**关键参数**：
 
-#### (5) 棋形评估 (Evaluation)
+| 参数 | 值 | 说明 |
+|:---|:---|:---|
+| `MAX_DEPTH` | 2 | Alpha-Beta 搜索深度 |
+| `TSS_DEPTH` | 4 | 威胁空间搜索深度 |
+| `SEARCH_CANDIDATES` | 15 | 候选点数量 |
+| `MAX_SEARCH_TIME_MS` | 4500ms | 超时保护阈值 |
 
-- **全局评估**：扫描全盘四个方向（横、竖、左斜、右斜）。
-- **局部评估**：使用长度为 6 的滑动窗口（Sliding Window）检测棋型。
-- **策略**：进攻分与防守分综合计算，略微偏向防守（对方分数权重加倍），以确保在复杂对攻中不漏算防守点。
+#### (4) 威胁空间搜索 (TSS) 实现
+
+TSS 是 V3 的核心功能，专门用于搜索必胜序列：
+
+```java
+private MyMove tssInternal(int attacker, int depth, int maxDepth) {
+    // 超时检查
+    if (isTimeout() || depth >= maxDepth) return null;
+
+    // 只生成高威胁走法（冲四及以上）
+    List<ThreatMove> threats = generateHighThreatMoves(attacker);
+    
+    // 限制搜索数量防止爆炸
+    int searchLimit = Math.min(threats.size(), 5);
+    
+    for (ThreatMove tm : threats) {
+        applyMove(tm.move, attacker);
+        
+        // 检查是否形成双威胁（必胜）
+        if (countHighThreats(attacker) >= 2) {
+            undoMove(tm.move);
+            return tm.move;
+        }
+        
+        // 检查对方能否防守
+        // ...递归搜索
+    }
+}
+```
+
+#### (5) 置换表优化
+
+使用 Zobrist 哈希实现高效的置换表：
+
+```java
+// 预计算随机数表
+private static final long[][] ZOBRIST = new long[SIZE][3];
+
+// 增量更新哈希
+private void applyMove(MyMove m, int color) {
+    grid[m.p1] = color;
+    currentHash ^= ZOBRIST[m.p1][color];
+    // ...
+}
+
+// 置换表查询
+TTEntry entry = transTable.get(currentHash);
+if (entry != null && entry.depth >= depth) {
+    // 直接返回缓存结果
+}
+```
 
 ### 4. 合规性检查清单
 
-- [x] **代码规范**：包路径 `stud.g09`，stud.g09.AI 继承自 core.player.AI，并正确使用了 Board、Move 等类代码，注释完备，符合 Java 规范。
-- [x] **V1 达成(着法生成)**：能够防御 2 个以内的威胁，不产生异常。
-  - [x] (a) 识别必胜：在 evaluatePoint 和 scanAllLines 中使用了 SCORE_WIN (10,000,000) 和 SCORE_FIVE (1,000,000)来识别必胜和必应点。
-  - [x] (b) 检测威胁：实现了 findForcedDefenseMoves() 方法，该方法调用 getCriticalPoints 扫描对方得分极高（>=SCORE_LIVE_4）的点，识别出必须防守的“杀棋”。
-  - [x] (c) 棋感权重：在 getCandidates 方法中，不仅计算攻防分数，还显式加入了中心距离权重：score += (10 - Math.abs(x - cx) -Math.abs(y - cy));。
+- [x] **代码规范**：包路径 `stud.g09`，继承自 `core.player.AI`，符合 Java 规范。
 
-    
-- [x] **V2 达成(博弈树搜索)**：具备快速盘面评估与有效的 AB 剪枝。
-  - [x] (a) 估值函数：定义了详细的静态常量权值表（SCORE_LIVE_4, SCORE_DEAD_4, SCORE_LIVE_3 等），并在 evaluateLineAround中根据滑动窗口内的棋子数量和空位动态打分。
-  - [x] (b) AB 剪枝：实现了标准的 alphaBetaSearch、maxValue 和 minValue 递归方法，通过 alpha 和 beta 参数进行分支剪裁。
-  - [x] (c)有效搜索：设定了 MAX_DEPTH = 2 和 SEARCH_CANDIDATES = 15，限制了搜索深度和广度，保证了实时性。
-- [x] **V3 达成(威胁空间/高级搜索)**：融入威胁空间思想，实测胜率表现优异。
-  - [x] 威胁空间思想 (TSS)：在着法生成器中融入了 TSS思想。一旦发现局面中有“逼着”（如对方冲四、己方冲四），代码会立即剪掉所有非关键着法，只搜索这些强制性的“威胁空间”路径。这使得 AI 在复杂对杀中能计算得更深且更准。
+- [x] **V1 达成 (着法生成 + 胜着识别)**：
+  - [x] (a) **胜着识别**：`findWinningMove()` 检测六连、五连、活四组合。
+  - [x] (b) **强制防御**：`findForcedDefense()` 检测对方五连点和活四点。
+  - [x] (c) **棋感权重**：中心距离加分 `score += 15 - |x-9| - |y-9|`。
+
+- [x] **V2 达成 (博弈树搜索 + 置换表)**：
+  - [x] (a) **评估函数**：8级棋形权值表 + 6格滑动窗口扫描。
+  - [x] (b) **Alpha-Beta 剪枝**：`alphaBetaSearch()` + `maxValue()` + `minValue()`。
+  - [x] (c) **Zobrist 置换表**：`TTEntry` 类缓存搜索结果。
+
+- [x] **V3 达成 (威胁空间搜索 TSS)**：
+  - [x] (a) **TSS 实现**：`threatSpaceSearch()` 4层深度威胁搜索。
+  - [x] (b) **双威胁检测**：`countHighThreats()` 识别必胜局面。
+  - [x] (c) **超时保护**：`isTimeout()` 4.5秒强制返回，防止卡顿。
+  - [x] (d) **搜索剪枝**：只搜索前5个威胁、前3个防守点。
+
 - [x] **接口保护**：未对原有框架超类进行破坏性修改。
-
-

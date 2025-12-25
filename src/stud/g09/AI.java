@@ -6,11 +6,16 @@ import core.game.Game;
 import core.game.Move;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
- * G09 AI Optimized for Connect6
- * 策略：Alpha-Beta 搜索 + 精确棋形评估 + 威胁剪枝
+ * G09 AI - 完整实现六子棋 V1/V2/V3 功能
+ * 
+ * V1: 基础着法生成 + 胜着识别 + 基本防御
+ * V2: 盘面估值 + Alpha-Beta 剪枝  
+ * V3: 威胁空间搜索 (TSS) + 置换表优化
  */
 public class AI extends core.player.AI {
 
@@ -21,35 +26,45 @@ public class AI extends core.player.AI {
     private static final int EMPTY = 0;
     private static final int BLACK = 1;
     private static final int WHITE = 2;
-    private static final int BORDER = 3; // 用于边界判定
 
-    // 评分权重 (Connect6 特有)
-    // 赢棋
+    // ============ V2: 评分权重 ============
     private static final int SCORE_WIN = 10_000_000;
-    // 活五 (下两子必成六) 或 冲五 (下一子成六) -> 极高威胁
     private static final int SCORE_FIVE = 1_000_000;
-    // 活四 (_XXXX_) -> 下一手加两子成六，必胜
     private static final int SCORE_LIVE_4 = 500_000;
-    // 冲四 (OXXXX_) -> 必须阻挡
-    private static final int SCORE_DEAD_4 = 50_000;
-    // 活三 (_XXX_) -> 强潜力
-    private static final int SCORE_LIVE_3 = 5_000;
-    // 冲三 (OXXX_)
-    private static final int SCORE_DEAD_3 = 500;
-    // 活二 (_XX_)
-    private static final int SCORE_LIVE_2 = 100;
+    private static final int SCORE_DEAD_4 = 80_000;
+    private static final int SCORE_LIVE_3 = 10_000;
+    private static final int SCORE_DEAD_3 = 1_000;
+    private static final int SCORE_LIVE_2 = 200;
+    private static final int SCORE_DEAD_2 = 50;
 
-    // 搜索参数
-    private static final int MAX_DEPTH = 2; // 六子棋分支极大，2层配合好的评估已足够强
-    private static final int SEARCH_CANDIDATES = 15; // 每层只选前N个高分点组合
+    // ============ 搜索参数 ============
+    private static final int MAX_DEPTH = 2;               // Alpha-Beta搜索深度
+    private static final int TSS_DEPTH = 4;               // 威胁搜索深度（降低防止卡顿）
+    private static final int SEARCH_CANDIDATES = 15;      // 候选点数量
+    private static final long MAX_SEARCH_TIME_MS = 4500;  // 最大搜索时间（毫秒）
 
     private final int[] grid = new int[SIZE];
     private int myColorInt;
     private int oppColorInt;
+    private long searchStartTime;  // 搜索开始时间
 
-    // 方向向量：右，下，右下，左下
+    // 方向向量
     private static final int[] DX = {1, 0, 1, 1};
     private static final int[] DY = {0, 1, 1, -1};
+
+    // V3: 置换表
+    private static final long[][] ZOBRIST = new long[SIZE][3];
+    private long currentHash = 0;
+    private final Map<Long, TTEntry> transTable = new HashMap<>();
+
+    static {
+        java.util.Random r = new java.util.Random(12345);
+        for (int i = 0; i < SIZE; i++) {
+            for (int j = 0; j < 3; j++) {
+                ZOBRIST[i][j] = r.nextLong();
+            }
+        }
+    }
 
     @Override
     public String name() {
@@ -60,6 +75,7 @@ public class AI extends core.player.AI {
     public void playGame(Game game) {
         super.playGame(game);
         this.board = new Board();
+        transTable.clear();
     }
 
     @Override
@@ -68,43 +84,28 @@ public class AI extends core.player.AI {
             this.board.makeMove(opponentMove);
         }
 
-        // 1. 同步棋盘并确定颜色
-        int stones = 0;
-        for (int i = 0; i < SIZE; i++) {
-            PieceColor c = this.board.get(i);
-            if (c == PieceColor.BLACK) {
-                grid[i] = BLACK;
-                stones++;
-            } else if (c == PieceColor.WHITE) {
-                grid[i] = WHITE;
-                stones++;
-            } else {
-                grid[i] = EMPTY;
-            }
+        // 记录搜索开始时间
+        searchStartTime = System.currentTimeMillis();
+
+        // 1. 同步棋盘
+        syncBoard();
+
+        // 2. 判断颜色
+        int blackCnt = 0, whiteCnt = 0;
+        for (int x : grid) {
+            if (x == BLACK) blackCnt++;
+            else if (x == WHITE) whiteCnt++;
         }
 
-        // 判断执棋颜色 (Black先手1子，之后每人2子。总数%4==1或0时该白，否则该黑？)
-        // 实际上可以用 stones 数量判断。
-        // Move 0: Black(1) -> stones=1. White move.
-        // Move 1: White(2) -> stones=3. Black move.
-        // Move 2: Black(2) -> stones=5. White move.
-        // 规律: (stones + 1) / 2 是回合数。
-        // 简单判断：如果当前 board.get(lastMove) 是黑，那我是白，反之亦然。
-        // 或者直接根据 stones 奇偶性判断谁该下（注意第一手特例）
-        // 假设当前轮到我下：
-        if (stones == 0) { // 我是先手黑棋，只下一子
-            // 开局占天元
+        // 开局第一手
+        if (blackCnt == 0 && whiteCnt == 0) {
             myColorInt = BLACK;
             oppColorInt = WHITE;
-            // 修复：Move 构造函数需要两个参数，使用 -1 作为无效的第二手棋子
-            return new Move(WIDTH/2 * WIDTH + WIDTH/2, -1);
+            int center = WIDTH / 2 * WIDTH + WIDTH / 2;
+            Move move = new Move(center, -1);
+            this.board.makeMove(move);
+            return move;
         }
-
-        // 简单判定颜色逻辑：根据已存在棋子推断
-        // 一般来说框架会保证调用 findNextMove 时是我的回合
-        // 如果棋盘上黑子多于白子，且差值为1，则轮到白子。
-        int blackCnt = 0, whiteCnt = 0;
-        for(int x : grid) { if(x == BLACK) blackCnt++; else if(x == WHITE) whiteCnt++; }
 
         if (blackCnt > whiteCnt) {
             myColorInt = WHITE;
@@ -114,38 +115,259 @@ public class AI extends core.player.AI {
             oppColorInt = WHITE;
         }
 
-        // 2. 执行搜索
-        Move bestMove = alphaBetaSearch();
+        // 3. 智能搜索
+        Move bestMove = findBestMove();
         this.board.makeMove(bestMove);
         return bestMove;
     }
 
-    // --- 搜索核心 ---
+    // 检查是否超时
+    private boolean isTimeout() {
+        return System.currentTimeMillis() - searchStartTime > MAX_SEARCH_TIME_MS;
+    }
 
-    private Move alphaBetaSearch() {
-        // 第一步：检查是否有直接获胜的走法
-        List<MyMove> winMoves = findWinningMoves(myColorInt);
-        if (!winMoves.isEmpty()) return winMoves.get(0).toMove();
+    private void syncBoard() {
+        currentHash = 0;
+        for (int i = 0; i < SIZE; i++) {
+            PieceColor c = this.board.get(i);
+            if (c == PieceColor.BLACK) {
+                grid[i] = BLACK;
+                currentHash ^= ZOBRIST[i][BLACK];
+            } else if (c == PieceColor.WHITE) {
+                grid[i] = WHITE;
+                currentHash ^= ZOBRIST[i][WHITE];
+            } else {
+                grid[i] = EMPTY;
+            }
+        }
+    }
 
-        // 第二步：检查是否必须防守（对方有必胜棋形）
-        List<MyMove> forcedMoves = findForcedDefenseMoves();
+    // ============ 主搜索入口 ============
+    private Move findBestMove() {
+        // V1: 检测直接获胜（非常快，不需要超时检查）
+        MyMove winMove = findWinningMove(myColorInt);
+        if (winMove != null) return winMove.toMove();
 
-        List<MyMove> moves;
-        if (!forcedMoves.isEmpty()) {
-            moves = forcedMoves; // 被迫防守，只搜索这些走法
-        } else {
-            moves = generateMoves(myColorInt); // 常规生成
+        // V1: 检测强制防御（非常快）
+        MyMove defMove = findForcedDefense();
+        if (defMove != null) return defMove.toMove();
+
+        // V3: 威胁空间搜索 (TSS) - 带超时保护
+        if (!isTimeout()) {
+            MyMove tssMove = threatSpaceSearch(TSS_DEPTH);
+            if (tssMove != null) return tssMove.toMove();
         }
 
-        if (moves.isEmpty()) return new Move(getAnyEmpty(), getAnyEmpty());
+        // V2: Alpha-Beta 搜索
+        return alphaBetaSearch().toMove();
+    }
+
+    // ============ V1: 胜着识别 ============
+    private MyMove findWinningMove(int color) {
+        List<Integer> fivePoints = new ArrayList<>();
+        List<Integer> live4Points = new ArrayList<>();
+
+        for (int i = 0; i < SIZE; i++) {
+            if (grid[i] != EMPTY) continue;
+
+            int score = evaluatePoint(i, color);
+
+            if (score >= SCORE_WIN) {
+                int second = findBestSecond(i, color);
+                return new MyMove(i, second);
+            }
+            if (score >= SCORE_FIVE) {
+                fivePoints.add(i);
+            } else if (score >= SCORE_LIVE_4) {
+                live4Points.add(i);
+            }
+        }
+
+        if (fivePoints.size() >= 2) {
+            return new MyMove(fivePoints.get(0), fivePoints.get(1));
+        }
+        if (fivePoints.size() >= 1 && !live4Points.isEmpty()) {
+            return new MyMove(fivePoints.get(0), live4Points.get(0));
+        }
+        if (live4Points.size() >= 2) {
+            return new MyMove(live4Points.get(0), live4Points.get(1));
+        }
+
+        return null;
+    }
+
+    // ============ V1: 强制防御 ============
+    private MyMove findForcedDefense() {
+        List<Integer> oppFives = new ArrayList<>();
+        List<Integer> oppLive4s = new ArrayList<>();
+
+        for (int i = 0; i < SIZE; i++) {
+            if (grid[i] != EMPTY) continue;
+
+            int score = evaluatePoint(i, oppColorInt);
+
+            if (score >= SCORE_FIVE) {
+                oppFives.add(i);
+            } else if (score >= SCORE_LIVE_4) {
+                oppLive4s.add(i);
+            }
+        }
+
+        if (oppFives.size() >= 2) {
+            return new MyMove(oppFives.get(0), oppFives.get(1));
+        }
+        if (oppFives.size() == 1) {
+            int def = oppFives.get(0);
+            int second = !oppLive4s.isEmpty() ? oppLive4s.get(0) : findBestSecond(def, myColorInt);
+            return new MyMove(def, second);
+        }
+        if (oppLive4s.size() >= 2) {
+            return new MyMove(oppLive4s.get(0), oppLive4s.get(1));
+        }
+
+        return null;
+    }
+
+    // ============ V3: 威胁空间搜索 (TSS) - 带超时保护 ============
+    private MyMove threatSpaceSearch(int maxDepth) {
+        return tssInternal(myColorInt, 0, maxDepth);
+    }
+
+    private MyMove tssInternal(int attacker, int depth, int maxDepth) {
+        // 超时检查
+        if (isTimeout() || depth >= maxDepth) return null;
+
+        // 只生成高威胁走法（活四及以上）
+        List<ThreatMove> threats = generateHighThreatMoves(attacker);
+        if (threats.isEmpty()) return null;
+
+        // 限制搜索数量防止爆炸
+        int searchLimit = Math.min(threats.size(), 5);
+        int defender = (attacker == myColorInt) ? oppColorInt : myColorInt;
+
+        for (int t = 0; t < searchLimit; t++) {
+            if (isTimeout()) break;
+            
+            ThreatMove tm = threats.get(t);
+            applyMove(tm.move, attacker);
+
+            // 检查是否形成双威胁（必胜）
+            if (tm.score >= SCORE_LIVE_4) {
+                int threatCount = countHighThreats(attacker);
+                if (threatCount >= 2) {
+                    undoMove(tm.move);
+                    return tm.move;
+                }
+            }
+
+            // 简化：只检查最佳防守
+            List<Integer> defPoints = getTopDefensePoints(attacker, 3);
+            boolean canDefend = false;
+
+            for (int dp : defPoints) {
+                if (isTimeout()) break;
+                if (grid[dp] != EMPTY) continue;
+
+                int dp2 = findBestSecond(dp, defender);
+                if (dp2 == dp || grid[dp2] != EMPTY) continue;
+
+                MyMove defMove = new MyMove(dp, dp2);
+                applyMove(defMove, defender);
+
+                MyMove nextThreat = tssInternal(attacker, depth + 1, maxDepth);
+
+                undoMove(defMove);
+
+                if (nextThreat == null) {
+                    canDefend = true;
+                    break;
+                }
+            }
+
+            undoMove(tm.move);
+
+            if (!canDefend && !defPoints.isEmpty()) {
+                return tm.move;
+            }
+        }
+
+        return null;
+    }
+
+    // 生成高威胁走法（只考虑活四及以上）
+    private List<ThreatMove> generateHighThreatMoves(int color) {
+        List<ThreatMove> threats = new ArrayList<>();
+        List<PointScore> candidates = new ArrayList<>();
+
+        for (int i = 0; i < SIZE; i++) {
+            if (grid[i] != EMPTY) continue;
+            if (!hasNeighbor(i, 2)) continue;
+
+            int score = evaluatePoint(i, color);
+            if (score >= SCORE_DEAD_4) {  // 只考虑冲四及以上
+                candidates.add(new PointScore(i, score));
+            }
+        }
+
+        Collections.sort(candidates);
+
+        // 限制组合数量
+        int limit = Math.min(candidates.size(), 6);
+        for (int i = 0; i < limit; i++) {
+            for (int j = i + 1; j < limit; j++) {
+                int p1 = candidates.get(i).idx;
+                int p2 = candidates.get(j).idx;
+                int combinedScore = candidates.get(i).score + candidates.get(j).score;
+                threats.add(new ThreatMove(new MyMove(p1, p2), combinedScore));
+            }
+        }
+
+        threats.sort((a, b) -> b.score - a.score);
+        return threats;
+    }
+
+    // 统计高威胁点数量
+    private int countHighThreats(int color) {
+        int count = 0;
+        for (int i = 0; i < SIZE; i++) {
+            if (grid[i] != EMPTY) continue;
+            if (evaluatePoint(i, color) >= SCORE_LIVE_4) count++;
+        }
+        return count;
+    }
+
+    // 获取前N个防守点
+    private List<Integer> getTopDefensePoints(int attacker, int limit) {
+        List<PointScore> points = new ArrayList<>();
+        for (int i = 0; i < SIZE; i++) {
+            if (grid[i] != EMPTY) continue;
+            int score = evaluatePoint(i, attacker);
+            if (score >= SCORE_DEAD_4) {
+                points.add(new PointScore(i, score));
+            }
+        }
+        Collections.sort(points);
+        
+        List<Integer> result = new ArrayList<>();
+        for (int i = 0; i < Math.min(limit, points.size()); i++) {
+            result.add(points.get(i).idx);
+        }
+        return result;
+    }
+
+    // ============ V2: Alpha-Beta 搜索 ============
+    private MyMove alphaBetaSearch() {
+        List<MyMove> moves = generateMoves(myColorInt);
+        if (moves.isEmpty()) return new MyMove(getAnyEmpty(), getAnyEmpty());
 
         MyMove best = moves.get(0);
-        int alpha = -2_000_000_000;
-        int beta = 2_000_000_000;
+        int alpha = Integer.MIN_VALUE + 1;
+        int beta = Integer.MAX_VALUE - 1;
 
         for (MyMove m : moves) {
+            if (isTimeout()) break;
+            
             applyMove(m, myColorInt);
-            // 深度为 1 即可，因为 generateMoves 已经做了一定的筛选
             int val = minValue(MAX_DEPTH - 1, alpha, beta);
             undoMove(m);
 
@@ -154,140 +376,122 @@ public class AI extends core.player.AI {
                 best = m;
             }
         }
-        return best.toMove();
+        return best;
     }
 
     private int maxValue(int depth, int alpha, int beta) {
+        if (isTimeout()) return evaluate();
+        
+        // 置换表查询
+        TTEntry entry = transTable.get(currentHash);
+        if (entry != null && entry.depth >= depth) {
+            if (entry.flag == TTEntry.EXACT) return entry.value;
+            if (entry.flag == TTEntry.LOWER) alpha = Math.max(alpha, entry.value);
+            if (entry.flag == TTEntry.UPPER) beta = Math.min(beta, entry.value);
+            if (alpha >= beta) return entry.value;
+        }
+
         int score = evaluate();
-        if (depth <= 0 || Math.abs(score) > SCORE_WIN / 2) return score;
+        if (depth <= 0 || Math.abs(score) >= SCORE_WIN / 2) return score;
 
         List<MyMove> moves = generateMoves(myColorInt);
         if (moves.isEmpty()) return score;
 
-        int bestVal = -2_000_000_000;
+        int bestVal = Integer.MIN_VALUE + 1;
         for (MyMove m : moves) {
             applyMove(m, myColorInt);
             int val = minValue(depth - 1, alpha, beta);
             undoMove(m);
 
-            if (val > bestVal) bestVal = val;
-            if (bestVal > alpha) alpha = bestVal;
+            bestVal = Math.max(bestVal, val);
+            alpha = Math.max(alpha, bestVal);
             if (beta <= alpha) break;
         }
+
+        int flag = bestVal <= alpha ? TTEntry.UPPER :
+                   bestVal >= beta ? TTEntry.LOWER : TTEntry.EXACT;
+        transTable.put(currentHash, new TTEntry(depth, bestVal, flag));
+
         return bestVal;
     }
 
     private int minValue(int depth, int alpha, int beta) {
+        if (isTimeout()) return evaluate();
+        
+        TTEntry entry = transTable.get(currentHash);
+        if (entry != null && entry.depth >= depth) {
+            if (entry.flag == TTEntry.EXACT) return entry.value;
+            if (entry.flag == TTEntry.LOWER) alpha = Math.max(alpha, entry.value);
+            if (entry.flag == TTEntry.UPPER) beta = Math.min(beta, entry.value);
+            if (alpha >= beta) return entry.value;
+        }
+
         int score = evaluate();
-        if (depth <= 0 || Math.abs(score) > SCORE_WIN / 2) return score;
+        if (depth <= 0 || Math.abs(score) >= SCORE_WIN / 2) return score;
 
         List<MyMove> moves = generateMoves(oppColorInt);
         if (moves.isEmpty()) return score;
 
-        int bestVal = 2_000_000_000;
+        int bestVal = Integer.MAX_VALUE - 1;
         for (MyMove m : moves) {
             applyMove(m, oppColorInt);
             int val = maxValue(depth - 1, alpha, beta);
             undoMove(m);
 
-            if (val < bestVal) bestVal = val;
-            if (bestVal < beta) beta = bestVal;
+            bestVal = Math.min(bestVal, val);
+            beta = Math.min(beta, bestVal);
             if (beta <= alpha) break;
         }
+
+        int flag = bestVal <= alpha ? TTEntry.UPPER :
+                   bestVal >= beta ? TTEntry.LOWER : TTEntry.EXACT;
+        transTable.put(currentHash, new TTEntry(depth, bestVal, flag));
+
         return bestVal;
     }
 
-    // --- 走法生成与筛选 ---
-
-    // 寻找直接获胜的走法 (成六，或成活四/五)
-    private List<MyMove> findWinningMoves(int color) {
-        List<MyMove> wins = new ArrayList<>();
-        // 简化的启发式：如果能在某点形成 6 或 活4，直接返回
-        // 由于这需要复杂的探测，我们把它合并在 evaluateCandidate 中
-        // 这里留空，依赖 generateMoves 的排序将必胜棋排在最前
-        return wins;
-    }
-
-    // 寻找必须防守的走法（阻挡对方的五或活四）
-    private List<MyMove> findForcedDefenseMoves() {
-        // 检测对方的高威胁点
-        List<Integer> threats = getCriticalPoints(oppColorInt);
-        if (threats.isEmpty()) return Collections.emptyList();
-
-        // 必须在这些关键点上下子
-        List<MyMove> defense = new ArrayList<>();
-
-        // 如果威胁点非常多（>=2），我们必须同时堵住两个，或者堵一个并制造反威胁
-        // 简单策略：生成包含威胁点的走法
-        int t1 = threats.get(0);
-        int t2 = (threats.size() > 1) ? threats.get(1) : -1;
-
-        if (t2 != -1) {
-            // 两个威胁，必须都堵
-            defense.add(new MyMove(t1, t2));
-        } else {
-            // 一个威胁，堵住它，另一子选高分点
-            List<Integer> candidates = getCandidates(myColorInt, 5);
-            for (int c : candidates) {
-                if (c != t1) defense.add(new MyMove(t1, c));
-            }
-            if (defense.isEmpty()) { // 找不到好的第二点，随便找个邻居
-                defense.add(new MyMove(t1, getBestNeighbor(t1)));
-            }
-        }
-        return defense;
-    }
-
-    // 生成候选走法
+    // ============ 走法生成 ============
     private List<MyMove> generateMoves(int color) {
         List<MyMove> moves = new ArrayList<>();
-
-        // 1. 获取单点评估最高的前 N 个点
         List<Integer> candidates = getCandidates(color, SEARCH_CANDIDATES);
 
-        // 2. 组合这些点
-        // 策略：高分点两两组合
+        if (candidates.size() < 2) {
+            candidates = getEmptyNearStones();
+        }
+
         for (int i = 0; i < candidates.size(); i++) {
             for (int j = i + 1; j < candidates.size(); j++) {
                 moves.add(new MyMove(candidates.get(i), candidates.get(j)));
             }
         }
 
-        // 如果还是没有走法（比如开局），选中心
-        if (moves.isEmpty()) {
-            int center = WIDTH/2 * WIDTH + WIDTH/2;
-            if (grid[center] == EMPTY) {
-                moves.add(new MyMove(center, getBestNeighbor(center)));
-            } else {
-                moves.add(new MyMove(getAnyEmpty(), getAnyEmpty()));
-            }
-        }
-        return moves;
+        // 按组合价值排序并限制数量
+        moves.sort((a, b) -> {
+            int sa = evaluatePoint(a.p1, color) + evaluatePoint(a.p2, color);
+            int sb = evaluatePoint(b.p1, color) + evaluatePoint(b.p2, color);
+            return sb - sa;
+        });
+
+        int limit = Math.min(moves.size(), 30);
+        return new ArrayList<>(moves.subList(0, limit));
     }
 
-    // 评估所有空位价值，返回前 limit 个
     private List<Integer> getCandidates(int color, int limit) {
         List<PointScore> scores = new ArrayList<>();
+        int opp = (color == myColorInt) ? oppColorInt : myColorInt;
 
         for (int i = 0; i < SIZE; i++) {
             if (grid[i] != EMPTY) continue;
+            if (!hasNeighbor(i, 2)) continue;
 
-            // 评分 = 进攻分 + 防守分
             int attack = evaluatePoint(i, color);
-            int defense = evaluatePoint(i, oppColorInt);
+            int defense = evaluatePoint(i, opp);
+            int total = attack + defense;
 
-            // 六子棋中，防守通常比进攻更紧迫，除非进攻能直接赢
-            // 简单的总分
-            int score = attack + defense;
-
-            // 距离中心的微弱加分（打破平局）
-            int cx = WIDTH/2, cy = WIDTH/2;
             int x = i % WIDTH, y = i / WIDTH;
-            score += (10 - Math.abs(x - cx) - Math.abs(y - cy));
+            total += 15 - Math.abs(x - 9) - Math.abs(y - 9);
 
-            if (score > 10) { // 过滤掉太差的点
-                scores.add(new PointScore(i, score));
-            }
+            scores.add(new PointScore(i, total));
         }
 
         Collections.sort(scores);
@@ -296,213 +500,264 @@ public class AI extends core.player.AI {
         for (int k = 0; k < Math.min(limit, scores.size()); k++) {
             result.add(scores.get(k).idx);
         }
+
+        if (result.isEmpty()) {
+            int center = WIDTH / 2 * WIDTH + WIDTH / 2;
+            if (grid[center] == EMPTY) result.add(center);
+            else result.add(getAnyEmpty());
+        }
+
         return result;
     }
 
-    // 检测某一方的必救点（冲四、活四、五连的空位）
-    private List<Integer> getCriticalPoints(int color) {
-        List<Integer> points = new ArrayList<>();
-        // 利用 evaluatePoint 如果分数极高，说明是关键点
+    private List<Integer> getEmptyNearStones() {
+        List<Integer> result = new ArrayList<>();
         for (int i = 0; i < SIZE; i++) {
-            if (grid[i] != EMPTY) continue;
-            int score = evaluatePoint(i, color);
-            // 如果此点能形成活四或五连，则是关键点
-            if (score >= SCORE_LIVE_4) {
-                points.add(i);
+            if (grid[i] == EMPTY && hasNeighbor(i, 2)) {
+                result.add(i);
             }
         }
-        return points;
+        if (result.isEmpty()) {
+            result.add(WIDTH / 2 * WIDTH + WIDTH / 2);
+        }
+        return result;
     }
 
-    // --- 棋形评估 ---
+    private boolean hasNeighbor(int pos, int range) {
+        int x = pos % WIDTH, y = pos / WIDTH;
+        for (int dy = -range; dy <= range; dy++) {
+            for (int dx = -range; dx <= range; dx++) {
+                if (dx == 0 && dy == 0) continue;
+                int nx = x + dx, ny = y + dy;
+                if (isValid(nx, ny) && grid[ny * WIDTH + nx] != EMPTY) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
 
-    // 全盘静态评估
+    // ============ 评估函数 ============
     private int evaluate() {
         int myScore = evaluateColor(myColorInt);
         int oppScore = evaluateColor(oppColorInt);
-        return myScore - oppScore * 2; // 稍微偏向防守 (Opponent score 权重高一点)
+        return myScore - oppScore;
     }
 
-    // 评估单色全盘分数
     private int evaluateColor(int color) {
         int total = 0;
-        // 扫描四个方向的所有线
-        // 为了性能，这里可以做增量更新，但 Java 实现为了简单先全盘扫
+        int opp = (color == myColorInt) ? oppColorInt : myColorInt;
 
-        // 水平
-        for(int y=0; y<WIDTH; y++) {
-            for(int x=0; x<WIDTH; x++) {
-                // 仅当是线的起点或前一个不是同色时开始统计，避免重复
-                // 这里为了简单，仅统计定长 pattern
-                if (grid[y*WIDTH+x] == color) {
-                    // 实际上全盘扫描比较复杂，这里简化：
-                    // 遍历所有可能的 6 格窗口还是比较稳健的
-                }
-            }
+        for (int d = 0; d < 4; d++) {
+            total += scanDirection(color, opp, DX[d], DY[d]);
         }
 
-        // 由于全盘扫描代码量大，我们使用一种基于 Line Scanning 的方法
-        // 直接复用 evaluateLine 逻辑
-        return scanAllLines(color);
+        return total;
     }
 
-    private int scanAllLines(int color) {
+    private int scanDirection(int color, int opp, int dx, int dy) {
         int score = 0;
-        // 4个方向
-        for (int i = 0; i < 4; i++) {
-            score += scanDirection(color, DX[i], DY[i]);
-        }
-        return score;
-    }
 
-    private int scanDirection(int color, int dx, int dy) {
-        int score = 0;
-        boolean[][] visited = new boolean[WIDTH][WIDTH]; // 避免重复计算同一串
+        for (int startY = 0; startY < WIDTH; startY++) {
+            for (int startX = 0; startX < WIDTH; startX++) {
+                int px = startX - dx, py = startY - dy;
+                if (isValid(px, py)) continue;
 
-        for (int y = 0; y < WIDTH; y++) {
-            for (int x = 0; x < WIDTH; x++) {
-                if (visited[y][x]) continue;
-                if (grid[y*WIDTH+x] == color) {
-                    // 发现棋子，向后延伸统计连续长度
-                    int count = 0;
-                    int curX = x, curY = y;
-                    while(isValid(curX, curY) && grid[curY*WIDTH+curX] == color) {
-                        visited[curY][curX] = true;
-                        count++;
-                        curX += dx;
-                        curY += dy;
+                int x = startX, y = startY;
+                while (true) {
+                    int endX = x + 5 * dx;
+                    int endY = y + 5 * dy;
+                    if (!isValid(endX, endY)) break;
+
+                    int myCount = 0, emptyCount = 0;
+                    boolean blocked = false;
+
+                    for (int i = 0; i < 6; i++) {
+                        int nx = x + i * dx;
+                        int ny = y + i * dy;
+                        int cell = grid[ny * WIDTH + nx];
+                        if (cell == color) myCount++;
+                        else if (cell == EMPTY) emptyCount++;
+                        else { blocked = true; break; }
                     }
 
-                    // 统计两端空位
-                    int empty = 0;
-                    // 前端 (x - dx, y - dy)
-                    if (isValid(x - dx, y - dy) && grid[(y-dy)*WIDTH+(x-dx)] == EMPTY) empty++;
-                    // 后端 (curX, curY)
-                    if (isValid(curX, curY) && grid[curY*WIDTH+curX] == EMPTY) empty++;
-
-                    // 根据长度和空位数评分 (这里是基础连子，不包含跳子，跳子需更复杂逻辑)
-                    // Connect6 允许跳子成连，但基础 AI 先只看连续的
-                    if (count >= 6) score += SCORE_WIN;
-                    else if (count == 5) score += SCORE_FIVE;
-                    else if (count == 4) {
-                        if (empty == 2) score += SCORE_LIVE_4;
-                        else if (empty == 1) score += SCORE_DEAD_4;
-                    } else if (count == 3) {
-                        if (empty == 2) score += SCORE_LIVE_3;
-                        else if (empty == 1) score += SCORE_DEAD_3;
-                    } else if (count == 2) {
-                        if (empty == 2) score += SCORE_LIVE_2;
+                    if (!blocked) {
+                        if (myCount == 6) score += SCORE_WIN;
+                        else if (myCount == 5 && emptyCount == 1) score += SCORE_FIVE;
+                        else if (myCount == 4 && emptyCount == 2) score += SCORE_LIVE_4;
+                        else if (myCount == 4 && emptyCount == 1) score += SCORE_DEAD_4;
+                        else if (myCount == 3 && emptyCount == 3) score += SCORE_LIVE_3;
+                        else if (myCount == 3 && emptyCount >= 2) score += SCORE_DEAD_3;
+                        else if (myCount == 2 && emptyCount == 4) score += SCORE_LIVE_2;
+                        else if (myCount == 2 && emptyCount >= 2) score += SCORE_DEAD_2;
                     }
+
+                    x += dx;
+                    y += dy;
                 }
             }
         }
         return score;
     }
 
-    // 评估在点 p 下子能不能形成好棋形
     private int evaluatePoint(int p, int color) {
-        int score = 0;
-        int x = p % WIDTH;
-        int y = p / WIDTH;
+        int x = p % WIDTH, y = p / WIDTH;
+        int maxScore = 0;
+        int opp = (color == myColorInt) ? oppColorInt : myColorInt;
 
-        grid[p] = color; // 试着下这个子
+        grid[p] = color;
 
-        // 检查 4 个方向
-        for(int d=0; d<4; d++) {
-            // 简单的局部线性扫描：向前找5步，向后找5步
-            // 统计 6 格范围内的最大棋子数
-            score += evaluateLineAround(x, y, DX[d], DY[d], color);
+        for (int d = 0; d < 4; d++) {
+            int score = evaluateLineAtPoint(x, y, DX[d], DY[d], color, opp);
+            maxScore = Math.max(maxScore, score);
         }
 
-        grid[p] = EMPTY; // 还原
-        return score;
+        grid[p] = EMPTY;
+        return maxScore;
     }
 
-    // 评估经过 (x,y) 的某条线上，在 (x,y) 落子后的价值
-    private int evaluateLineAround(int x, int y, int dx, int dy, int color) {
-        // 我们查看包含 (x,y) 的所有长度为 6 的窗口
-        // 只要有一个窗口满足条件，就加分
+    private int evaluateLineAtPoint(int x, int y, int dx, int dy, int color, int opp) {
         int maxScore = 0;
 
-        // k 是窗口的起始偏移量，从 -5 到 0
         for (int k = -5; k <= 0; k++) {
-            int cnt = 0;
-            int empty = 0;
+            int myCount = 0, emptyCount = 0;
             boolean blocked = false;
 
-            // 检查窗口 [k, k+5]
-            for (int w = 0; w < 6; w++) {
-                int nx = x + (k + w) * dx;
-                int ny = y + (k + w) * dy;
+            for (int i = 0; i < 6; i++) {
+                int nx = x + (k + i) * dx;
+                int ny = y + (k + i) * dy;
 
                 if (!isValid(nx, ny)) { blocked = true; break; }
 
-                int val = grid[ny*WIDTH+nx];
-                if (val == color) cnt++;
-                else if (val == EMPTY) empty++;
+                int val = grid[ny * WIDTH + nx];
+                if (val == color) myCount++;
+                else if (val == EMPTY) emptyCount++;
                 else { blocked = true; break; }
             }
 
             if (!blocked) {
-                int currentScore = 0;
-                if (cnt == 6) currentScore = SCORE_WIN;
-                else if (cnt == 5) currentScore = SCORE_FIVE; // 下完变成5，说明原来是4
-                else if (cnt == 4) currentScore = SCORE_LIVE_4; // 这是粗略估计，未严格区分活/冲
-                else if (cnt == 3) currentScore = SCORE_LIVE_3;
-                else if (cnt == 2) currentScore = SCORE_LIVE_2;
+                int score = 0;
+                if (myCount == 6) score = SCORE_WIN;
+                else if (myCount == 5) score = SCORE_FIVE;
+                else if (myCount == 4 && emptyCount >= 2) score = SCORE_LIVE_4;
+                else if (myCount == 4) score = SCORE_DEAD_4;
+                else if (myCount == 3 && emptyCount >= 3) score = SCORE_LIVE_3;
+                else if (myCount == 3) score = SCORE_DEAD_3;
+                else if (myCount == 2 && emptyCount >= 4) score = SCORE_LIVE_2;
 
-                if (currentScore > maxScore) maxScore = currentScore;
+                maxScore = Math.max(maxScore, score);
             }
         }
+
         return maxScore;
     }
 
-    // --- 辅助 ---
-
+    // ============ 辅助方法 ============
     private boolean isValid(int x, int y) {
         return x >= 0 && x < WIDTH && y >= 0 && y < WIDTH;
     }
 
     private void applyMove(MyMove m, int color) {
-        if (m.p1 != -1) grid[m.p1] = color;
-        if (m.p2 != -1) grid[m.p2] = color;
+        if (m.p1 >= 0 && m.p1 < SIZE) {
+            grid[m.p1] = color;
+            currentHash ^= ZOBRIST[m.p1][color];
+        }
+        if (m.p2 >= 0 && m.p2 < SIZE) {
+            grid[m.p2] = color;
+            currentHash ^= ZOBRIST[m.p2][color];
+        }
     }
 
     private void undoMove(MyMove m) {
-        if (m.p1 != -1) grid[m.p1] = EMPTY;
-        if (m.p2 != -1) grid[m.p2] = EMPTY;
+        if (m.p1 >= 0 && m.p1 < SIZE) {
+            currentHash ^= ZOBRIST[m.p1][grid[m.p1]];
+            grid[m.p1] = EMPTY;
+        }
+        if (m.p2 >= 0 && m.p2 < SIZE) {
+            currentHash ^= ZOBRIST[m.p2][grid[m.p2]];
+            grid[m.p2] = EMPTY;
+        }
     }
 
-    private int getBestNeighbor(int idx) {
-        int x = idx % WIDTH, y = idx / WIDTH;
-        for(int dy=-1; dy<=1; dy++) {
-            for(int dx=-1; dx<=1; dx++) {
-                if(dx==0 && dy==0) continue;
-                if (isValid(x+dx, y+dy) && grid[(y+dy)*WIDTH+(x+dx)] == EMPTY)
-                    return (y+dy)*WIDTH+(x+dx);
+    private int findBestSecond(int first, int color) {
+        int best = -1;
+        int bestScore = -1;
+
+        for (int i = 0; i < SIZE; i++) {
+            if (i == first || grid[i] != EMPTY) continue;
+
+            int score = evaluatePoint(i, color);
+            if (score > bestScore) {
+                bestScore = score;
+                best = i;
             }
         }
-        return getAnyEmpty();
+
+        if (best == -1) best = getAnyEmpty();
+        return best;
     }
 
     private int getAnyEmpty() {
-        for(int i=0; i<SIZE; i++) if (grid[i] == EMPTY) return i;
+        int center = WIDTH / 2 * WIDTH + WIDTH / 2;
+        if (grid[center] == EMPTY) return center;
+
+        for (int i = 0; i < SIZE; i++) {
+            if (grid[i] == EMPTY) return i;
+        }
         return 0;
     }
 
+    // ============ 内部类 ============
     private static class MyMove {
         int p1, p2;
-        MyMove(int p1, int p2) { this.p1 = p1; this.p2 = p2; }
+
+        MyMove(int p1, int p2) {
+            this.p1 = p1;
+            this.p2 = p2;
+        }
+
         Move toMove() {
-            if (p2 == -1) return new Move(p1, -1); // 使用 -1 作为无效位置
             return new Move(p1, p2);
         }
     }
 
     private static class PointScore implements Comparable<PointScore> {
         int idx, score;
-        PointScore(int i, int s) { idx = i; score = s; }
+
+        PointScore(int i, int s) {
+            idx = i;
+            score = s;
+        }
+
         @Override
-        public int compareTo(PointScore o) { return o.score - this.score; } // 降序
+        public int compareTo(PointScore o) {
+            return o.score - this.score;
+        }
+    }
+
+    private static class ThreatMove {
+        MyMove move;
+        int score;
+
+        ThreatMove(MyMove m, int s) {
+            move = m;
+            score = s;
+        }
+    }
+
+    private static class TTEntry {
+        static final int EXACT = 0;
+        static final int LOWER = 1;
+        static final int UPPER = 2;
+
+        int depth;
+        int value;
+        int flag;
+
+        TTEntry(int d, int v, int f) {
+            depth = d;
+            value = v;
+            flag = f;
+        }
     }
 }
